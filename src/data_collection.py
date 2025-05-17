@@ -4,8 +4,8 @@ import csv
 from urllib.parse import quote_plus
 
 # Variáveis principais
-linha = "Semana_epidem._1º_Sintomas(s)"
-coluna = "UF_F.infecção"
+linha = "Município_de_notificação"
+coluna = "Semana_epidem._notificação"
 arquivos = "dengpe14.dbf"
 
 # Codifica as variáveis
@@ -99,60 +99,27 @@ except requests.RequestException as e:
 # Parsing do HTML
 soup = BeautifulSoup(response.text, "html.parser")
 
-# Extrai a tag <pre> com os dados
+# Extrai o conteúdo da tag <pre> que contém a tabela
 pre_tag = soup.find("pre")
 if not pre_tag:
-    print("Tag <pre> não encontrada!")
+    print("Tabela não encontrada no HTML.")
     exit()
 
 # Processa o conteúdo da tag <pre>
-data = pre_tag.text.strip().splitlines()
-if data[-1] == "&":  # Remove o "&" final
-    data = data[:-1]
+table_data = pre_tag.text.strip().splitlines()
 
-# Valida e processa as linhas como CSV
-headers = None
-total_row = None
-other_rows = []
-seen_rows = set()  # Para evitar duplicatas
+# Remove o caractere '&' da última linha, se presente
+if table_data[-1].endswith('&'):
+    table_data[-1] = table_data[-1][:-1]
 
-for line in data:
-    # Divide a linha por ";" e remove aspas
-    cells = [cell.strip('"') for cell in line.split(";")]
-    # Verifica se a linha tem o número esperado de colunas (6)
-    if len(cells) == 6:
-        row_tuple = tuple(cells)
-        if row_tuple not in seen_rows:
-            seen_rows.add(row_tuple)
-            # Identifica o tipo de linha
-            if cells[0] == "Semana epidem. notificação":
-                headers = cells
-            elif cells[0] == "Total":
-                total_row = cells
-            else:
-                other_rows.append(cells)
+# Escreve os dados em um arquivo CSV
+output_file = "dengue_table_2014.csv"
+with open(output_file, mode='w', newline='', encoding='utf-8') as file:
+    writer = csv.writer(file, delimiter=';')
+    for line in table_data:
+        # Divide a linha pelos delimitadores e remove as aspas
+        row = [item.strip('"') for item in line.split(';')]
+        print(row)
+        writer.writerow(row)
 
-# Monta a lista final de linhas na ordem desejada
-rows = []
-if headers:
-    rows.append(headers)  # Cabeçalho
-if total_row:
-    rows.append(total_row)  # Total logo após o cabeçalho
-rows.extend(other_rows)  # Demais linhas
-
-print(rows)
-
-# Salva em CSV
-try:
-    with open("dengue_pe.csv", "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerows(rows)
-    print(f"✅ Dados salvos em dengue_pe.csv com {len(rows)} linhas")
-except Exception as e:
-    print(f"Erro ao salvar o CSV: {e}")
-
-# Verifica o número de linhas
-if len(rows) > 60:  # Esperado: ~56 linhas
-    print("⚠️ Aviso: O número de linhas é maior que o esperado. Verifique possíveis duplicatas ou dados extras.")
-elif len(rows) < 50:
-    print("⚠️ Aviso: O número de linhas é menor que o esperado. Verifique se todos os dados foram capturados.")
+print(f"Tabela extraída e salva em {output_file}")
