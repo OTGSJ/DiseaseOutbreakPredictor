@@ -5,13 +5,12 @@ from urllib.parse import quote_plus
 from datetime import date
 from epiweeks import Week
 
-# Entradas do usuário
+# Solicitar a sigla do estado
 estado_sigla = input("Digite a sigla do estado (ex: PE, SP, RJ): ").strip().upper()
-municipio_alvo = input("Digite o nome exato do município (como aparece na base do SINAN): ").strip().upper()
 
 # Função para montar e executar a requisição por ano
-def coletar_dados_ano(ano, estado, municipio_filtro):
-    sufixo_ano = str(ano)[-2:]  # Ex: 2014 → '14'
+def coletar_dados_ano(ano, estado):
+    sufixo_ano = str(ano)[-2:]  # Ex: 2021 → '21'
     arquivos = f"deng{estado.lower()}{sufixo_ano}.dbf"
 
     linha = "Município_de_notificação"
@@ -26,7 +25,7 @@ def coletar_dados_ano(ano, estado, municipio_filtro):
         f"Coluna={coluna_enc}&"
         f"Incremento=Casos_Prováveis&"
         f"Arquivos={arquivos_enc}&"
-        "formato=prn&mostre=Mostra"
+        f"formato=prn&mostre=Mostra"
     )
 
     url = f"http://tabnet.datasus.gov.br/cgi/tabcgi.exe?sinannet/cnv/dengueb{estado.lower()}.def"
@@ -63,19 +62,17 @@ def coletar_dados_ano(ano, estado, municipio_filtro):
             semanas = row[1:]
         else:
             municipio = row[0].strip().upper()
-            if municipio_filtro in municipio:
-                valores = row[1:]
-                for idx, val in enumerate(valores):
-                    semana = semanas[idx].strip().upper()
-                    if semana == 'TOTAL':  # Ignora a linha total na coluna semana
-                        continue
-                    valor = val.strip()
-                    if valor == '' or valor == '-':
-                        valor = '0'
-                    dados.append([ano, semana, municipio, valor])
-    print(f"[{ano}] {len(dados)} registros coletados para {municipio_filtro}.")
+            valores = row[1:]
+            for idx, val in enumerate(valores):
+                semana = semanas[idx].strip().upper()
+                if semana == 'TOTAL':  # Ignora a linha total na coluna semana
+                    continue
+                valor = val.strip()
+                if valor == '' or valor == '-':
+                    valor = '0'
+                dados.append([ano, semana, municipio, valor])
+    print(f"[{ano}] {len(dados)} registros coletados para o estado {estado}.")
     return dados
-
 
 # Obtém o ano e semana epidemiológica atuais
 hoje = date.today()
@@ -85,15 +82,19 @@ ano_atual = semana_epi.year
 # Coleta e consolida os dados de todos os anos
 todos_dados = []
 for ano in range(2021, ano_atual + 1):
-    dados_ano = coletar_dados_ano(ano, estado_sigla, municipio_alvo)
+    dados_ano = coletar_dados_ano(ano, estado_sigla)
     todos_dados.extend(dados_ano)
 
 # Verifica se houve dados encontrados
 if not todos_dados:
-    print(f"\nNenhum dado encontrado para o município '{municipio_alvo}' no estado '{estado_sigla}'. Verifique a grafia.")
+    print(f"\nNenhum dado encontrado para o estado '{estado_sigla}'. Verifique a sigla ou a conexão.")
 else:
+    # Contar municípios únicos
+    municipios_unicos = sorted(set([row[2] for row in todos_dados]))
+    print(f"\nEncontrados {len(municipios_unicos)} municípios únicos no estado {estado_sigla}.")
+
     # Salva todos os dados em um único arquivo CSV
-    nome_arquivo = f"dengue_{estado_sigla}_{municipio_alvo.replace(' ', '_')}_2021-{ano_atual}.csv"
+    nome_arquivo = f"dengue_{estado_sigla}_todos_municipios_2021-{ano_atual}.csv"
     with open(nome_arquivo, mode='w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file, delimiter=';')
         writer.writerow(["Ano", "Semana", "Municipio", "Casos"])
@@ -101,3 +102,4 @@ else:
 
     print(f"\nArquivo final salvo como: {nome_arquivo}")
     print(f"Total de registros: {len(todos_dados)}")
+    print(f"Total de municípios: {len(municipios_unicos)}")

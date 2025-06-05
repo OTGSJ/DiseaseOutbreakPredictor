@@ -5,7 +5,6 @@ import geobr
 import warnings
 import unicodedata
 
-# Ignorar warnings do Meteostat (opcional, para limpar a saída)
 warnings.filterwarnings("ignore", category=UserWarning, module="meteostat")
 
 def normalize_text(text):
