@@ -1,17 +1,11 @@
 import requests
 import pandas as pd
 import unicodedata
-import warnings
-import os
-import re
-from datetime import datetime
-
-warnings.filterwarnings("ignore", category=UserWarning)
 
 def normalize_text(text):
-    """Normaliza texto para remover acentos e espaços."""
+    """Normaliza texto para remover problemas de codificação."""
     if isinstance(text, str):
-        return unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('ASCII').replace(' ', '_')
+        return unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('ASCII')
     return text
 
 def get_state_code(state_input):
@@ -37,220 +31,135 @@ def get_state_code(state_input):
     else:
         raise ValueError("Estado não encontrado. Use nome completo ou sigla (ex.: 'PE' ou 'Pernambuco').")
 
-def get_municipios_codes(state_input):
-    """Obter códigos e nomes de municípios para um estado via API do IBGE."""
-    sigla, state_name, state_code = get_state_code(state_input)
-    url = f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{state_code}/municipios"
+def get_municipio_nome(tercodigo, municipios_cache=None):
+    """Obtém o nome do município a partir do TERCODIGO usando a API do IBGE."""
+    if municipios_cache is None:
+        try:
+            url_municipios = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
+            response = requests.get(url_municipios)
+            response.raise_for_status()
+            municipios_cache = response.json()
+        except requests.exceptions.RequestException as e:
+            print(f"Erro ao acessar API do IBGE: {e}")
+            return "Erro ao obter nome"
     
-    print(f"\nObtendo códigos de municípios para {state_name}...")
-    try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        
-        municipios = []
-        for item in data:
-            codigo = str(item['id'])
-            nome = normalize_text(item['nome'])
-            municipios.append({'TERCODIGO': codigo, 'Municipio': nome})
-        
-        df_municipios = pd.DataFrame(municipios)
-        return df_municipios
-    
-    except requests.exceptions.RequestException as e:
-        print(f"Erro na requisição de códigos de municípios: {e}")
-        return None
+    for municipio in municipios_cache:
+        if str(municipio['id']) == tercodigo:
+            return normalize_text(municipio['nome'])
+    return "Desconhecido"
 
-def collect_from_api(state_input, year):
-    """Coletar dados de população via API do IBGE."""
+def collect_idhm_data(state_input):
+    """Coletar dados de IDHM para os municípios do estado informado."""
+    # Obter sigla, nome e código do estado
     sigla, state_name, state_code = get_state_code(state_input)
-    url = f"https://servicodados.ibge.gov.br/api/v3/agregados/6579/periodos/{year}/variaveis/9324?localidades=N6[all]"
     
-    print(f"\nColetando dados de população para {state_name} em {year} via API...")
+    # URL para metadados do Ipeadata
+    url_metadata = "http://www.ipeadata.gov.br/api/odata4/Metadados"
+    
     try:
-        response = requests.get(url, timeout=30)
-        response.raise_for_status()
-        data = response.json()
+        # Verificar séries disponíveis
+        response_metadata = requests.get(url_metadata)
+        response_metadata.raise_for_status()
+        metadata = response_metadata.json()
         
-        if not data or not data[0].get('resultados'):
-            raise ValueError(f"Resultados vazios para {year} na API.")
+        # Confirmar que a série IDHM existe
+        series = [s for s in metadata['value'] if s['SERCODIGO'] == 'IDHM']
+        if not series:
+            raise ValueError("Série IDHM não encontrada nos metadados.")
         
+        print(f"Série IDHM confirmada para {state_name} (código {state_code}).")
+        
+        # URL para valores da série IDHM (sem filtros)
+        url_valores = "http://www.ipeadata.gov.br/api/odata4/ValoresSerie(SERCODIGO='IDHM')"
+        
+        # Fazer a requisição para valores
+        response_valores = requests.get(url_valores)
+        response_valores.raise_for_status()
+        data = response_valores.json()
+        
+        # Cache dos municípios do IBGE para evitar múltiplas chamadas
+        url_municipios = "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
+        response_municipios = requests.get(url_municipios)
+        response_municipios.raise_for_status()
+        municipios_cache = response_municipios.json()
+        
+        # Lista para armazenar resultados
         resultados = []
-        for item in data[0]['resultados'][0]['series']:
-            codigo = str(item['localidade']['id'])
-            municipio = normalize_text(item['localidade']['nome'].split(' - ')[0])
-            populacao = int(item['serie'][year])
-            resultados.append({'TERCODIGO': codigo, 'Municipio': municipio, 'Populacao': populacao})
         
+        # Processar os dados
+        for item in data['value']:
+            ano = item['VALDATA'][:4]
+            nivel = item['NIVNOME']
+            tercodigo = item['TERCODIGO']
+            idhm = float(item['VALVALOR'])
+            resultados.append({'Ano': ano, 'NIVNOME': nivel, 'TERCODIGO': tercodigo, 'IDHM': idhm})
+        
+        # Criar DataFrame
         df = pd.DataFrame(resultados)
-        df_state = df[df['TERCODIGO'].str.startswith(state_code)]
         
+        # Filtrar para o estado (TERCODIGO começando com o código da UF), ano 2010 e nível Municípios
+        df_state = df[
+            (df['TERCODIGO'].str.startswith(state_code)) &
+            (df['Ano'] == '2010') &
+            (df['NIVNOME'] == 'Municípios')
+        ]
+        
+        # Verificar se há dados
         if df_state.empty:
-            raise ValueError(f"Nenhum dado encontrado para {state_name} em {year}.")
+            raise ValueError(f"Nenhum dado encontrado para {state_name} em 2010 (Municípios). A série IDHM pode não conter dados para este ano.")
         
-        print(f"Encontrados {len(df_state)} municípios para {state_name} em {year}.")
+        # Mapear TERCODIGO para nomes de municípios
+        df_state['Municipio'] = df_state['TERCODIGO'].apply(lambda x: get_municipio_nome(x, municipios_cache))
+        
+        # Verificar valores de IDHM
+        if all(df_state['IDHM'].between(0.4, 0.9)):
+            print("Dados de IDHM validados com sucesso.")
+        else:
+            print("Aviso: Alguns valores de IDHM estão fora do intervalo esperado (~0.4–0.9).")
+        
+        # Selecionar colunas relevantes
+        df_state = df_state[['Municipio', 'IDHM']].rename(columns={'IDHM': 'IDHM_2010'})
+        
+        # Ordenar por município
+        df_state = df_state.sort_values(by='Municipio')
+        
+        # Exportar para CSV
+        output_file = f"{state_name.replace(' ', '_')}_idhm_2010.csv"
+        df_state.to_csv(output_file, index=False, encoding='utf-8-sig')
+        print(f"Dados exportados para {output_file}")
+        print(f"Número de municípios encontrados: {len(df_state)}")
+        
+        # Exibir resumo
+        print(f"\nResumo dos dados coletados para {state_name}:")
+        print(df_state.head())
+        
         return df_state
     
-    except requests.exceptions.RequestException as e:
-        print(f"Erro na requisição para {year}: {e}")
+    except requests.exceptions.HTTPError as e:
+        print(f"Erro na requisição à API do Ipeadata: {e}")
+        print("Possível causa: endpoint inválido ou série indisponível.")
+        print("Tente a alternativa manual do Atlas Brasil.")
         return None
-    except (KeyError, ValueError) as e:
-        print(f"Erro ao processar dados para {year}: {e}")
+    except KeyError as e:
+        print(f"Erro ao processar os dados: {e}")
         return None
-
-def process_2022_csv(state_input, file_path="tabela2022.csv"):
-    """Processar tabela2022.csv (Censo 2022)."""
-    sigla, state_name, state_code = get_state_code(state_input)
-    
-    print(f"\nProcessando dados de população para {state_name} em 2022 via {file_path}...")
-    try:
-        # Ler CSV, ignorando linhas de cabeçalho irrelevantes
-        df = pd.read_csv(file_path, sep=';', encoding='utf-8', skiprows=5)
-        
-        # Renomear colunas
-        df.columns = ['Municipio', 'Forma_Declaracao', 'Populacao']
-        
-        # Filtrar linhas onde Forma_Declaracao é "Total"
-        df = df[df['Forma_Declaracao'].str.strip() == 'Total']
-        
-        # Limpar nome do município (remover UF)
-        df['Municipio_Norm'] = df['Municipio'].apply(lambda x: re.sub(r'\s*\(.*\)', '', x).strip())
-        df['Municipio_Norm'] = df['Municipio_Norm'].apply(normalize_text)
-        df['Populacao'] = pd.to_numeric(df['Populacao'], errors='coerce').fillna(0).astype(int)
-        
-        # Filtrar por estado usando a UF no nome original
-        df = df[df['Municipio'].str.contains(f'\({sigla}\)', na=False)]
-        
-        # Obter códigos de municípios
-        df_municipios = get_municipios_codes(state_input)
-        if df_municipios is None:
-            raise ValueError("Não foi possível obter códigos de municípios para mapear TERCODIGO.")
-        
-        # Mapear TERCODIGO com base no nome normalizado
-        df = df.merge(df_municipios, left_on='Municipio_Norm', right_on='Municipio', how='left')
-        
-        # Verificar se há correspondências
-        if df['TERCODIGO'].isna().all():
-            print(f"Nenhum município de {state_name} encontrado em tabela2022.csv.")
-            return None
-        
-        df_state = df[['TERCODIGO', 'Municipio_Norm', 'Populacao']].rename(columns={'Municipio_Norm': 'Municipio'})
-        
-        if df_state.empty:
-            print(f"Nenhum dado encontrado para {state_name} em 2022 após mapeamento.")
-            return None
-        
-        print(f"Encontrados {len(df_state)} municípios para {state_name} em 2022.")
-        return df_state
-    
-    except Exception as e:
-        print(f"Erro ao processar tabela2022.csv: {e}")
-        return None
-
-def process_2023_csv(state_input, file_path="tabela2023.csv"):
-    """Processar tabela2023.csv (Estimativas 2024)."""
-    sigla, state_name, state_code = get_state_code(state_input)
-    
-    print(f"\nProcessando dados de população para {state_name} em 2023 via {file_path}...")
-    try:
-        # Ler CSV, pulando a linha de título e selecionando 5 colunas
-        df = pd.read_csv(file_path, encoding='utf-8', skiprows=1, usecols=[0,1,2,3,4])
-        
-        # Renomear colunas
-        expected_columns = ['UF', 'COD_UF', 'COD_MUNIC', 'Municipio', 'Populacao']
-        df.columns = expected_columns
-        
-        # Debug: Exibir colunas e COD_UF disponíveis
-        print(f"Colunas lidas em {file_path}: {list(df.columns)}")
-        unique_ufs = df['COD_UF'].unique()
-        print(f"COD_UF disponíveis em {file_path}: {unique_ufs}")
-        if int(state_code) not in unique_ufs:
-            raise ValueError(f"Estado {state_name} (COD_UF={state_code}) não encontrado em {file_path}.")
-        
-        # Limpar população (remover vírgulas, notas, espaços)
-        df['Populacao'] = df['Populacao'].str.replace(r'[,()]', '', regex=True).str.strip()
-        df['Populacao'] = pd.to_numeric(df['Populacao'], errors='coerce').fillna(0).astype(int)
-        
-        # Gerar TERCODIGO (COD_UF + COD_MUNIC)
-        df['COD_UF'] = df['COD_UF'].astype(str).str.zfill(2)
-        df['COD_MUNIC'] = df['COD_MUNIC'].astype(str).str.zfill(5)
-        df['TERCODIGO'] = df['COD_UF'] + df['COD_MUNIC']
-        df['Municipio'] = df['Municipio'].apply(normalize_text)
-        
-        # Filtrar por estado
-        df_state = df[df['COD_UF'] == state_code]
-        
-        if df_state.empty:
-            print(f"Nenhum dado encontrado para {state_name} (COD_UF={state_code}) em 2023.")
-            return None
-        
-        print(f"Encontrados {len(df_state)} municípios para {state_name} em 2023.")
-        return df_state[['TERCODIGO', 'Municipio', 'Populacao']]
-    
-    except Exception as e:
-        print(f"Erro ao processar tabela2023.csv: {e}")
-        return None
-
-def save_to_csv(df_state, state_name, year, output_dir):
-    """Salvar dados em um único CSV por ano dentro da pasta especificada."""
-    if df_state is None or df_state.empty:
-        return 0
-    
-    # Criar pasta se não existir
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Criar DataFrame com todos os municípios
-    output_file = os.path.join(output_dir, f"populacao_{state_name}_{year}.csv")
-    df_state.to_csv(output_file, columns=['TERCODIGO', 'Municipio', 'Populacao'], index=False, encoding='utf-8-sig')
-    
-    print(f"\nArquivo gerado: {output_file}")
-    print(f"Total de registros para {year}: {len(df_state)}")
-    print(f"\nResumo dos dados coletados para {state_name} em {year}:")
-    print(df_state[['TERCODIGO', 'Municipio', 'Populacao']].head(5))
-    return len(df_state)
-
-def main():
-    # Solicitar entrada
-    state_input = input("Digite o estado (ex.: 'PE' ou 'Pernambuco'): ")
-    years = ['2021', '2022', '2023', '2024']
-    
-    # Verificar arquivos locais
-    for file in ['tabela2022.csv', 'tabela2023.csv']:
-        if not os.path.exists(file):
-            print(f"Arquivo {file} não encontrado na pasta atual.")
-            return
-    
-    # Criar pasta de saída com timestamp
-    try:
-        _, state_name, _ = get_state_code(state_input)
     except ValueError as e:
         print(f"Erro: {e}")
-        return
+        return None
+
+def main():
+    # Solicitar estado do usuário
+    state_input = input("Digite o nome ou sigla do estado (ex.: 'PE' ou 'Pernambuco'): ")
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-    output_dir = f"populacao_{state_name.replace(' ', '_').replace('Í', 'I').replace('Á', 'A')}_{timestamp}"
-    
-    print(f"\nCriando pasta para CSVs: {output_dir}")
-    
-    # Processar cada ano
-    for year in years:
-        df_state = None
-        if year == '2022':
-            df_state = process_2022_csv(state_input)
-        elif year == '2023':
-            df_state = process_2023_csv(state_input)
+    # Coletar dados
+    try:
+        idhm_data = collect_idhm_data(state_input)
+        if idhm_data is not None:
+            print("Coleta de dados concluída com sucesso.")
         else:
-            df_state = collect_from_api(state_input, year)
-        
-        # Validação e salvamento
-        if df_state is not None and not df_state.empty:
-            if all(df_state['Populacao'] > 0):
-                print(f"Dados válidos para {year}.")
-            else:
-                print(f"Aviso: Alguns valores de população inválidos (<= 0) para {year}.")
-            save_to_csv(df_state, state_name.replace(' ', '_').replace('Í', 'I'), year, output_dir)
-        else:
-            print(f"Erro: Falha ao coletar dados para {year}. Verifique os dados de entrada ou a API.")
+            print("Falha na coleta de dados. Considere usar o Atlas Brasil.")
+    except Exception as e:
+        print(f"Erro inesperado: {e}")
 
 if __name__ == "__main__":
     main()
